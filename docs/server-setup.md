@@ -151,5 +151,41 @@ sudo ufw logging medium
 | `01-clean-install` | Ubuntu установлена, `apt upgrade` выполнен, сеть поднята |
 | `02-keys-configured` | пользователь `devops`, ключ, `Host devops` |
 | `03-ssh-hardened` | порт 2222, пароли выключены, `AllowUsers devops`, sshd перезапущен |
+| `04-nginx-https` | Nginx, HTTPS, HTTP 301, самоподписанный сертификат `devops.local` |
 
 Проверка скриптом: `sudo bash scripts/audit.sh` (код возврата 0). Для негативного теста временно `MaxAuthTries 10` — код возврата 1, затем вернуть `3`.
+
+## 8. Веб-сервер
+
+Пакет: `nginx` 1.24.0 (репозиторий Ubuntu, не `nginx-full`).
+
+Конфигурация ресурса: `/etc/nginx/sites-available/devops-site`, символическая ссылка в `/etc/nginx/sites-enabled/devops-site`. Стандартный ресурс отключён удалением ссылки `/etc/nginx/sites-enabled/default` (файл в `sites-available` сохранён).
+
+Каталог ресурса: `/var/www/devops-site`, владелец `devops:devops`, каталог `755`, файлы `644`. Рабочий процесс читает файлы как `www-data` за счёт прав «остальные»; запись веб-серверу не нужна и не выдаётся.
+
+Сертификат и ключ:
+
+| Путь | Владелец | Права |
+|---|---|---|
+| `/etc/ssl/certs/devops.crt` | `root:root` | `644` |
+| `/etc/ssl/private/devops.key` | `root:root` | `600` |
+
+Ключ за пределы `/etc/ssl/private` не копируется и в репозиторий не попадает. Открытый сертификат скопирован на хост доверенным каналом SSH: `~/devops.crt`.
+
+Формирование (365 суток, SAN обязателен, IP в SAN нет — адрес Host-only с DHCP):
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj "/CN=devops.local" \
+  -addext "subjectAltName=DNS:devops.local"
+```
+
+Проверка срока: `sudo openssl x509 -in /etc/ssl/certs/devops.crt -noout -dates`. Ожидается `notAfter` через год от даты выпуска.
+
+HTTP-блок: `return 301 https://$host$request_uri`. HTTPS: `listen 443 ssl`, протоколы `TLSv1.2 TLSv1.3`. Заголовок HSTS не добавляется.
+
+Применение конфигурации только так: `sudo nginx -t && sudo systemctl reload nginx`.
+
+Доставка с хоста: `scripts/deploy.sh` (`rsync -avz --delete --chmod=D755,F644`, одно SSH-соединение, `BatchMode=yes`, проверка `curl --cacert`).

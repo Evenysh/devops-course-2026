@@ -52,7 +52,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-curl -fsS --cacert "$CA_CERT" -o /dev/null "$SITE_URL"
+if ! curl -fsS --cacert "$CA_CERT" -o /dev/null "$SITE_URL"; then
+  echo "ресурс недоступен, доставка не подтверждена" >&2
+  exit 1
+fi
 
 echo "deployed $(git -C "$ROOT" rev-parse --short HEAD)"
 exit 0

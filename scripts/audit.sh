@@ -35,5 +35,22 @@ check "Политика incoming по умолчанию — deny" \
   "deny" "$(sudo ufw status verbose | awk '/^Default:/{print $2}')"
 echo "[3] Учётные записи"
 awk -F: '$3>=1000 && $3<65534 {printf "  %s (uid=%s)\n",$1,$3}' /etc/passwd
+echo "[4] Веб-сервер"
+check "служба nginx активна" \
+  "active" "$(systemctl is-active nginx)"
+nginx_t_rc=0
+sudo nginx -t >/dev/null 2>&1 || nginx_t_rc=$?
+check "конфигурация nginx синтаксически корректна" "0" "$nginx_t_rc"
+CERT_MIN_SECONDS="${CERT_MIN_SECONDS:-2592000}"
+cert_rc=0
+sudo openssl x509 -in /etc/ssl/certs/devops.crt -checkend "$CERT_MIN_SECONDS" >/dev/null 2>&1 || cert_rc=$?
+check "сертификат истекает не ранее чем через 30 дней" "0" "$cert_rc"
+ww_count="$(find /var/www/devops-site -perm -o+w | wc -l | tr -d ' ')"
+key_mode="$(sudo stat -c '%a' /etc/ssl/private/devops.key)"
+if [[ "$ww_count" == "0" && "$key_mode" == "600" ]]; then
+  check "нет world-writable файлов ресурса, ключ 600" "yes" "yes"
+else
+  check "нет world-writable файлов ресурса, ключ 600" "yes" "ww=${ww_count},key=${key_mode}"
+fi
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
