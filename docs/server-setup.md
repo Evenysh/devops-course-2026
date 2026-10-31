@@ -152,6 +152,7 @@ sudo ufw logging medium
 | `02-keys-configured` | пользователь `devops`, ключ, `Host devops` |
 | `03-ssh-hardened` | порт 2222, пароли выключены, `AllowUsers devops`, sshd перезапущен |
 | `04-nginx-https` | Nginx, HTTPS, HTTP 301, самоподписанный сертификат `devops.local` |
+| `05-docker-compose` | Docker Engine, Compose (приложение + PostgreSQL), том `app_db_data`, Nginx `location /app/` |
 
 Проверка скриптом: `sudo bash scripts/audit.sh` (код возврата 0). Для негативного теста временно `MaxAuthTries 10` — код возврата 1, затем вернуть `3`.
 
@@ -189,3 +190,104 @@ HTTP-блок: `return 301 https://$host$request_uri`. HTTPS: `listen 443 ssl`, 
 Применение конфигурации только так: `sudo nginx -t && sudo systemctl reload nginx`.
 
 Доставка с хоста: `scripts/deploy.sh` (`rsync -avz --delete --chmod=D755,F644`, одно SSH-соединение, `BatchMode=yes`, проверка `curl --cacert`).
+
+## 9. Контейнеризация
+
+Пакет `docker.io` из репозитория Ubuntu не используется. Docker Engine ставится из официального репозитория `download.docker.com` (архитектура ARM64, код Ubuntu `noble`).
+
+Ключ и список пакетов:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+Фактические версии:
+
+| Компонент | Значение |
+|---|---|
+| Docker Engine | 29.9.2 (`5:29.9.2-1~ubuntu.24.04~noble`) |
+| Compose plugin | v5.6.1 |
+| Репозиторий | `https://download.docker.com/linux/ubuntu noble/stable arm64` |
+| Файл списка | `/etc/apt/sources.list.d/docker.list` |
+| Ключ | `/etc/apt/keyrings/docker.asc` |
+
+Служба: `sudo systemctl enable --now docker`. Ожидается `systemctl is-active docker` → `active`.
+
+Группа `docker` (gid 988): только `devops`. Добавление:
+
+```bash
+sudo usermod -aG docker devops
+```
+
+После `usermod` нужна **новая** SSH-сессия, иначе сокет `/var/run/docker.sock` недоступен (permission denied). Учётные записи без `sudo` в группу `docker` не включать: участник группы может смонтировать `/` на запись и фактически получить права root.
+
+Проект на сервере: `/home/devops/app` (копия каталога `app/` репозитория). Доставка с хоста:
+
+```bash
+rsync -avz --delete --exclude=.env \
+  -e "ssh -o BatchMode=yes" \
+  app/ devops:~/app/
+```
+
+Секреты не в git и не в контексте сборки. На сервере файл `/home/devops/app/.env` создаётся из `app/.env.example`, права `600`, владелец `devops:devops`:
+
+```bash
+cp ~/app/.env.example ~/app/.env
+chmod 600 ~/app/.env
+```
+
+Содержимое (пароль задаётся на сервере, в репозиторий не попадает):
+
+```
+POSTGRES_DB=app
+POSTGRES_USER=app
+POSTGRES_PASSWORD=<секрет>
+DB_HOST=db
+```
+
+Файл `app/.dockerignore` исключает `.env` из контекста сборки. Образ: `devops-app:1.0`, процесс gunicorn от пользователя `app` (uid 999), порт контейнера 5000.
+
+Конфигурация Compose (`/home/devops/app/docker-compose.yml`):
+
+- сеть проекта `backend` (bridge); приложение резолвит СУБД по имени `db`;
+- том `db_data` → на хосте `app_db_data` (`docker volume ls`);
+- СУБД `postgres:16-alpine`, порт 5432 **не публикуется**, healthcheck `pg_isready`;
+- приложение публикует только `127.0.0.1:5000:5000`;
+- `depends_on: db: condition: service_healthy`;
+- `restart: unless-stopped`.
+
+Запуск:
+
+```bash
+cd ~/app
+docker compose up -d --build
+docker compose ps    # app-db-1 (healthy), app-app-1 127.0.0.1:5000->5000
+```
+
+Имена контейнеров: `app-app-1`, `app-db-1`. Проверка портов: `sudo ss -tlnp | grep -E ':(5000|5432)\b'` — ожидается только `127.0.0.1:5000`; `5432` на сервере не слушает.
+
+`docker compose down` сохраняет том; `docker compose down -v` удаляет данные (на рабочем сервере не выполнять без необходимости).
+
+Обратный прокси в HTTPS-блоке `/etc/nginx/sites-available/devops-site`:
+
+```
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий `/` в `proxy_pass` снимает префикс `/app/`: `/app/health` → `/health`. Применение: `sudo nginx -t && sudo systemctl reload nginx`.
+
+Проверка с хоста: `curl --cacert ~/devops.crt https://devops.local/app/` и `/app/health`; статический ресурс `curl --cacert ~/devops.crt -I https://devops.local/` остаётся 200. Если контейнер приложения остановлен, Nginx возвращает 502 и пишет в `/var/log/nginx/devops-site.error.log` строку `connect() failed (111: Connection refused) while connecting to upstream`.
