@@ -78,5 +78,30 @@ else
 fi
 env_mode="$(stat -c '%a' "${env_home}/app/.env" 2>/dev/null || echo missing)"
 check "права ~/app/.env равны 600" "600" "$env_mode"
+echo "[6] Контрольная работа № 2"
+kr2_dir="${env_home}/kr2"
+redis_id="$(docker compose --project-directory "$kr2_dir" ps -q redis 2>/dev/null || true)"
+if [[ -n "$redis_id" ]]; then
+  redis_health="$(docker inspect -f '{{.State.Health.Status}}' "$redis_id" 2>/dev/null || echo missing)"
+else
+  redis_health="missing"
+fi
+check "контейнер сервиса redis в состоянии healthy" "healthy" "$redis_health"
+app_port="$(docker compose --project-directory "$kr2_dir" port app 8002 2>/dev/null || echo missing)"
+if [[ "$app_port" == 127.0.0.1:* ]]; then
+  check "порт 8002 опубликован только на 127.0.0.1" "yes" "yes"
+else
+  check "порт 8002 опубликован только на 127.0.0.1" "127.0.0.1:8002" "$app_port"
+fi
+kr2_env_mode="$(stat -c '%a' "${kr2_dir}/.env" 2>/dev/null || echo missing)"
+check "права ~/kr2/.env равны 600" "600" "$kr2_env_mode"
+kr2_cert_rc=0
+sudo openssl x509 -in /etc/ssl/certs/kr2.crt -checkend "$CERT_MIN_SECONDS" >/dev/null 2>&1 || kr2_cert_rc=$?
+check "сертификат kr2 истекает не ранее чем через 30 дней" "0" "$kr2_cert_rc"
+if [[ -L /etc/nginx/sites-enabled/kr2 ]]; then
+  check "ресурс kr2 активирован" "yes" "yes"
+else
+  check "ресурс kr2 активирован" "yes" "no"
+fi
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
