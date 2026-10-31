@@ -52,5 +52,31 @@ if [[ "$ww_count" == "0" && "$key_mode" == "600" ]]; then
 else
   check "нет world-writable файлов ресурса, ключ 600" "yes" "ww=${ww_count},key=${key_mode}"
 fi
+echo "[5] Контейнеризация"
+check "служба docker активна" \
+  "active" "$(systemctl is-active docker)"
+db_health="$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null || echo missing)"
+check "контейнер СУБД в состоянии healthy" "healthy" "$db_health"
+listen_other="$(ss -tln | awk '
+  $1 == "LISTEN" {
+    n = split($4, parts, ":")
+    port = parts[n]
+    addr = substr($4, 1, length($4) - length(port) - 1)
+    if ((port == "5000" || port == "5432") && addr != "127.0.0.1" && addr != "[::1]") {
+      print $4
+    }
+  }')"
+if [[ -z "$listen_other" ]]; then
+  check "порты 5000 и 5432 не слушают кроме 127.0.0.1" "yes" "yes"
+else
+  check "порты 5000 и 5432 не слушают кроме 127.0.0.1" "yes" "$listen_other"
+fi
+if [[ -n "${SUDO_USER:-}" ]]; then
+  env_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+else
+  env_home="$HOME"
+fi
+env_mode="$(stat -c '%a' "${env_home}/app/.env" 2>/dev/null || echo missing)"
+check "права ~/app/.env равны 600" "600" "$env_mode"
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
