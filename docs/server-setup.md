@@ -291,3 +291,36 @@ location /app/ {
 Завершающий `/` в `proxy_pass` снимает префикс `/app/`: `/app/health` → `/health`. Применение: `sudo nginx -t && sudo systemctl reload nginx`.
 
 Проверка с хоста: `curl --cacert ~/devops.crt https://devops.local/app/` и `/app/health`; статический ресурс `curl --cacert ~/devops.crt -I https://devops.local/` остаётся 200. Если контейнер приложения остановлен, Nginx возвращает 502 и пишет в `/var/log/nginx/devops-site.error.log` строку `connect() failed (111: Connection refused) while connecting to upstream`.
+
+## 10. Ansible
+
+Воспроизводимая настройка после снимка `01-clean-install` описывается плейбуками в каталоге `ansible/` репозитория `devops-course-2026` (ветка `feature/ansible`). Запуск — из этого каталога, чтобы подхватился локальный `ansible.cfg` (`force_handlers = True`, inventory по умолчанию `inventory/prod.ini`).
+
+**Узлы.** Управляющий — macOS с Ansible и коллекциями из `requirements.yml`. Управляемый — эта VM (Ubuntu Server 24.04 ARM64, Host-only `192.168.56.102`, SSH на порту 22). HTTPS в этом контуре не настраивается.
+
+**Inventory.** `inventory/bootstrap.ini` — первичное подключение учётной записью `student` (пароль или заранее установленный ключ). `inventory/prod.ini` — последующие запуски учётной записью `devops` по ключу, без интерактивного ввода. После роли `ssh` парольная аутентификация отключена: повторять bootstrap нельзя, только prod.
+
+**Роли.**
+
+| Роль | Ответственность |
+|---|---|
+| `base` | Ubuntu 24.04 ARM64, пакеты (`python3-requests` для модулей `community.docker` на VM), официальный репозиторий Docker под `arm64`, Docker Engine, QEMU/`binfmt` для образа `linux/amd64` |
+| `ssh` | пользователь `devops`, ключ, `NOPASSWD` sudo, hardening (`00-ansible-hardening.conf`), UFW: 22 и 80 |
+| `nginx` | reverse proxy на порт 80 → `127.0.0.1:5000`, handlers `nginx -t` затем reload |
+| `app` | группа `docker`, pull GHCR по SHA, контейнер, health-check |
+
+**Приложение.** Образ `ghcr.io/evenysh/devops-ci-app`, тег (полный SHA зелёного коммита ПР10) `dcfd1ca7695b2383c0ac26f93425acf46fc1910e`. Имя контейнера `devops-ci-app`. Публикация только `127.0.0.1:5000:5000` (обход Nginx невозможен снаружи). Health: `GET /health` → `{"status":"ok"}`. С Mac: `curl --fail http://192.168.56.102/health`. На ARM образ тянется с `platform: linux/amd64`.
+
+**Запуск.**
+
+```bash
+cd ansible
+# первичный (пока доступен student)
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-become-pass
+# повторный и все следующие
+ansible-playbook site.yml
+# read-only аудит, конфигурацию не меняет
+ansible-playbook verify.yml
+```
+
+Повторный `site.yml` без дрейфа даёт `changed=0`. `verify.yml` проверяет `sshd -T` (passwordauthentication no, permitrootlogin no), что контейнер запущен, и прямой `/health`. `command: sshd -T` помечен `changed_when: false`, иначе каждый аудит считался бы изменением.
