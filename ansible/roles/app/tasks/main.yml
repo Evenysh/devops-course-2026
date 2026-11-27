@@ -11,7 +11,8 @@
     tag: "{{ app_tag }}"
     source: pull
     state: present
-    platform: "{{ app_platform }}"
+    pull:
+      platform: "{{ app_platform }}"
 
 - name: Run application container
   community.docker.docker_container:
@@ -28,8 +29,8 @@
     url: "http://127.0.0.1:{{ app_host_port }}/health"
     return_content: true
   register: app_health
-  retries: 15
-  delay: 2
+  retries: 20
+  delay: 3
   until: >
     (app_health.status | default(-1)) == 200 and
     (app_health.json | default({})).get("status") == "ok"
