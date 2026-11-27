@@ -1,0 +1,7 @@
+---
+app_image: "ghcr.io/evenysh/devops-ci-app"
+app_tag: "dcfd1ca7695b2383c0ac26f93425acf46fc1910e"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
+app_platform: "linux/amd64"
